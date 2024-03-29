@@ -38,7 +38,6 @@ pub struct ImageReference {
     pub namespace: String,
     pub name: String,
     pub version: String,
-    pub packages: Option<Vec<Package>>,
 }
 
 // DestinationRegistry
@@ -47,39 +46,6 @@ pub struct DestinationRegistry {
     pub protocol: String,
     pub registry: String,
     pub name: String,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct Package {
-    #[serde(rename = "name")]
-    pub name: String,
-
-    #[serde(rename = "channels")]
-    pub channels: Option<Vec<IncludeChannel>>,
-
-    #[serde(rename = "minVersion")]
-    pub min_version: Option<String>,
-
-    #[serde(rename = "maxVersion")]
-    pub max_version: Option<String>,
-
-    #[serde(rename = "minBundle")]
-    pub min_bundle: Option<String>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct IncludeChannel {
-    #[serde(rename = "name")]
-    pub name: String,
-
-    #[serde(rename = "minVersion")]
-    pub min_version: Option<String>,
-
-    #[serde(rename = "maxVersion")]
-    pub max_version: Option<String>,
-
-    #[serde(rename = "minBundle")]
-    pub min_bundle: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -880,20 +846,11 @@ mod tests {
 
     #[test]
     fn get_blobs_url_pass() {
-        let pkg = Package {
-            name: String::from("some-operator"),
-            channels: None,
-            min_version: None,
-            max_version: None,
-            min_bundle: None,
-        };
-        let pkgs = vec![pkg];
         let ir = ImageReference {
             registry: String::from("test.registry.io"),
             namespace: String::from("test"),
             name: String::from("some-operator"),
             version: String::from("v1.0.0"),
-            packages: Some(pkgs),
         };
         let res = get_blobs_url(ir);
         assert_eq!(
@@ -998,27 +955,11 @@ mod tests {
 
     #[test]
     fn get_image_manifest_url_pass() {
-        let ic = IncludeChannel {
-            name: String::from("preview"),
-            min_version: None,
-            max_version: None,
-            min_bundle: None,
-        };
-        let vec_ic = vec![ic];
-        let pkg = Package {
-            name: String::from("test"),
-            channels: Some(vec_ic),
-            min_version: None,
-            max_version: None,
-            min_bundle: None,
-        };
-        let vec_pkg = vec![pkg];
         let imageref = ImageReference {
             registry: String::from("test.registry.io"),
             namespace: String::from("test"),
             name: String::from("some-operator"),
             version: String::from("v0.0.1"),
-            packages: Some(vec_pkg),
         };
         let res = get_image_manifest_url(imageref);
         assert_eq!(
