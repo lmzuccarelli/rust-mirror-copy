@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use core::fmt;
 use custom_logger::*;
 use futures::{stream, StreamExt};
 use hex::encode;
@@ -10,10 +11,6 @@ use std::fs;
 use std::path::Path;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
-
-mod error;
-
-use crate::error::handler::*;
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -79,6 +76,25 @@ pub struct DestinationRegistry {
     pub protocol: String,
     pub registry: String,
     pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MirrorError {
+    details: String,
+}
+
+impl MirrorError {
+    pub fn new(msg: &str) -> MirrorError {
+        MirrorError {
+            details: msg.to_string(),
+        }
+    }
+}
+
+impl fmt::Display for MirrorError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", self.details)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -833,5 +849,11 @@ mod tests {
             res,
             String::from("http://127.0.0.1:5000/v2/test/test-component/blobs/uploads/")
         );
+    }
+
+    #[test]
+    fn err_pass() {
+        let err = MirrorError::new(&format!("testing error {}", "123456".to_string()));
+        assert_eq!(err.to_string(), "testing error 123456");
     }
 }
