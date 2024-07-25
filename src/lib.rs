@@ -147,7 +147,7 @@ impl RegistryInterface for ImplRegistryInterface {
         if token.len() == 0 {
             let body = client
                 .get(url)
-                .header("Accept", "application/vnd.oci.image.manifest.v1+json")
+                .header("Accept", "application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json")
                 .header("Content-Type", "application/json")
                 .send()
                 .await?
@@ -161,7 +161,7 @@ impl RegistryInterface for ImplRegistryInterface {
         header_bearer.push_str(&token);
         let body = client
             .get(url)
-            .header("Accept", "application/vnd.oci.image.manifest.v1+json")
+            .header("Accept", "application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json")
             .header("Content-Type", "application/json")
             .header("Authorization", header_bearer)
             .send()
