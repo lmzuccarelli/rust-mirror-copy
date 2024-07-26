@@ -12,6 +12,15 @@ use std::path::Path;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ManifestList {
+    #[serde(rename = "manifests")]
+    pub manifests: Vec<Manifest>,
+
+    #[serde(rename = "mediaType")]
+    pub media_type: String,
+}
+
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FsLayer {
@@ -28,7 +37,7 @@ pub struct Layer {
     pub digest: String,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Manifest {
     #[serde(rename = "schemaVersion")]
     pub schema_version: Option<i64>,
@@ -52,7 +61,7 @@ pub struct Manifest {
     pub layers: Option<Vec<Layer>>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct ManifestPlatform {
     #[serde(rename = "architecture")]
     pub architecture: String,
@@ -147,7 +156,7 @@ impl RegistryInterface for ImplRegistryInterface {
         if token.len() == 0 {
             let body = client
                 .get(url)
-                .header("Accept", "application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json")
+                .header("Accept", "application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json")
                 .header("Content-Type", "application/json")
                 .send()
                 .await?
@@ -161,7 +170,7 @@ impl RegistryInterface for ImplRegistryInterface {
         header_bearer.push_str(&token);
         let body = client
             .get(url)
-            .header("Accept", "application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json")
+            .header("Accept", "application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json")
             .header("Content-Type", "application/json")
             .header("Authorization", header_bearer)
             .send()
@@ -472,6 +481,20 @@ pub async fn process_blob(
     Ok(String::from("ok"))
 }
 
+// parse the manifest json for operator indexes only
+pub fn parse_json_manifestlist(data: String) -> Result<ManifestList, Box<dyn std::error::Error>> {
+    // Parse the string of data into serde_json::Manifest.
+    let root: ManifestList = serde_json::from_str(&data)?;
+    Ok(root)
+}
+
+// parse the manifest json for operator indexes only
+pub fn parse_json_manifest_operator(data: String) -> Result<Manifest, Box<dyn std::error::Error>> {
+    // Parse the string of data into serde_json::Manifest.
+    let root: Manifest = serde_json::from_str(&data)?;
+    Ok(root)
+}
+
 // construct the blobs url
 pub fn get_blobs_url(image_ref: ImageReference) -> String {
     // return a string in the form of (example below)
@@ -486,6 +509,7 @@ pub fn get_blobs_url(image_ref: ImageReference) -> String {
     url.push_str(&"blobs/");
     url
 }
+
 // construct the blobs url by string
 pub fn get_blobs_url_by_string(img: String) -> String {
     let mut parts = img.split("/");
