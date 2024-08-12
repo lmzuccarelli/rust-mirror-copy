@@ -190,7 +190,7 @@ impl RegistryInterface for ImplRegistryInterface {
         token: String,
         layers: Vec<FsLayer>,
     ) -> Result<String, Box<dyn std::error::Error>> {
-        const PARALLEL_REQUESTS: usize = 16;
+        const PARALLEL_REQUESTS: usize = 8;
         let client = Client::new();
 
         // remove all duplicates in FsLayer
@@ -234,13 +234,16 @@ impl RegistryInterface for ImplRegistryInterface {
                 }
             }
         }
+
         log.debug(&format!("blobs to download {}", images.len()));
         log.trace(&format!("fslayers vector {:#?}", images));
         let mut header_bearer: String = "Bearer ".to_owned();
         header_bearer.push_str(&token);
 
         if images.len() > 0 {
-            log.debug("downloading blobs...");
+            log.info("downloading blobs...");
+        } else {
+            log.debug("no diff found in blobs cache")
         }
 
         let fetches = stream::iter(images.into_iter().map(|blob| {
@@ -274,12 +277,9 @@ impl RegistryInterface for ImplRegistryInterface {
                         }
                     },
                     Err(e) => {
-                        // TODO: update signature to Box<dyn MirrorError>
-                        // and return the error
-                        //let msg = format!("downloading blob {}", &url);
-                        //log.error(&msg);
                         let err = MirrorError::new(&e.to_string());
-                        log.error(&err.to_string());
+                        log.error(&format!("downloading blob {:#?}", err.to_string()));
+                        //return Err(err);
                     }
                 }
             }
