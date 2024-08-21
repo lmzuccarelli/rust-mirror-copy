@@ -12,6 +12,8 @@ use std::path::Path;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 
+mod error;
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct ManifestList {
     #[serde(rename = "manifests")]
@@ -27,6 +29,7 @@ pub struct FsLayer {
     pub blob_sum: String,
     pub original_ref: Option<String>,
     pub size: Option<i64>,
+    pub number: Option<i16>,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -130,7 +133,7 @@ pub trait RegistryInterface {
         url: String,
         token: String,
         layers: Vec<FsLayer>,
-    ) -> Result<String, Box<dyn std::error::Error>>;
+    ) -> Result<String, MirrorError>;
 
     // used to interact with container registry (push blobs)
     async fn push_image(
@@ -189,7 +192,7 @@ impl RegistryInterface for ImplRegistryInterface {
         url: String,
         token: String,
         layers: Vec<FsLayer>,
-    ) -> Result<String, Box<dyn std::error::Error>> {
+    ) -> Result<String, MirrorError> {
         const PARALLEL_REQUESTS: usize = 8;
         let client = Client::new();
 
@@ -222,6 +225,7 @@ impl RegistryInterface for ImplRegistryInterface {
                         blob_sum: img.blob_sum.clone(),
                         original_ref: Some(img_ref),
                         size: img.size,
+                        number: None,
                     };
                     images.push(layer);
                 } else {
@@ -229,19 +233,19 @@ impl RegistryInterface for ImplRegistryInterface {
                         blob_sum: img.blob_sum.clone(),
                         original_ref: Some(url.clone()),
                         size: img.size,
+                        number: None,
                     };
                     images.push(layer);
                 }
             }
         }
 
-        log.debug(&format!("blobs to download {}", images.len()));
         log.trace(&format!("fslayers vector {:#?}", images));
         let mut header_bearer: String = "Bearer ".to_owned();
         header_bearer.push_str(&token);
 
         if images.len() > 0 {
-            log.info("downloading blobs...");
+            log.info(&format!("downloading {} blobs", images.len()));
         } else {
             log.debug("no diff found in blobs cache")
         }
@@ -262,24 +266,27 @@ impl RegistryInterface for ImplRegistryInterface {
                     Ok(resp) => match resp.bytes().await {
                         Ok(bytes) => {
                             let blob_digest = blob.blob_sum.split(":").nth(1).unwrap();
+                            let msg = format!("  writing blob {}", blob_digest);
+                            log.info(&msg);
                             let blob_dir = get_blobs_dir(wrk_dir.clone(), blob_digest);
                             fs::create_dir_all(blob_dir.clone())
                                 .expect("unable to create direcory");
                             fs::write(blob_dir + &blob_digest, bytes.clone())
                                 .expect("unable to write blob");
-                            let msg = format!("writing blob {}", blob_digest);
-                            log.info(&msg);
+                            println!("\x1b[1A \x1b[38C{}", "\x1b[1;92m✓\x1b[0m");
                         }
-                        Err(_) => {
-                            let msg = format!("writing blob {}", url.clone());
-                            log.error(&msg);
-                            //return Err(e);
+                        Err(err_resp) => {
+                            println!("\x1b[1A \x1b[38C{}", "\x1b[1;91m✗\x1b[0m");
+                            let err = MirrorError::new(&err_resp.to_string());
+                            //return Err(err);
+                            log.error(&format!("downloading blob {:#?}", err.to_string()));
                         }
                     },
                     Err(e) => {
+                        println!("\x1b[1A \x1b[38C{}", "\x1b[1;91m✗\x1b[0m");
                         let err = MirrorError::new(&e.to_string());
-                        log.error(&format!("downloading blob {:#?}", err.to_string()));
                         //return Err(err);
+                        log.error(&format!("downloading blob {:#?}", err.to_string()));
                     }
                 }
             }
@@ -481,6 +488,52 @@ pub async fn process_blob(
     Ok(String::from("ok"))
 }
 
+pub async fn get_blob(
+    log: &Logging,
+    dir: String,
+    url: String,
+    token: String,
+    _original_ref: String,
+    blob_sum: String,
+) -> Result<(), MirrorError> {
+    let client = Client::new();
+    let header_bearer = format!("Bearer {}", token.clone());
+    let inner_url = format!("{}{}", url.clone(), blob_sum);
+    let res = client
+        .get(inner_url.clone())
+        .header("Content-Type", "application/octet-stream")
+        .header("Authorization", header_bearer)
+        .send()
+        .await;
+    if res.is_ok() {
+        let body = res.unwrap().bytes().await;
+        if body.is_ok() {
+            let blob_digest = blob_sum.split(":").nth(1).unwrap();
+            let msg = format!("  writing blob {}", blob_digest);
+            log.info(&msg);
+            let blob_dir = get_blobs_dir(dir.clone(), blob_digest);
+            fs::create_dir_all(blob_dir.clone()).expect("unable to create direcory");
+            fs::write(blob_dir + &blob_digest, body.unwrap()).expect("unable to write blob");
+            println!("\x1b[1A \x1b[38C{}", "\x1b[1;92m✓\x1b[0m");
+        } else {
+            println!("\x1b[1A \x1b[38C{}", "\x1b[1;91m✗\x1b[0m");
+            let err = MirrorError::new(&format!(
+                "reading body contents (fetch blob) {}",
+                body.err().unwrap().to_string().to_lowercase()
+            ));
+            return Err(err);
+        }
+    } else {
+        println!("\x1b[1A \x1b[38C{}", "\x1b[1;91m✗\x1b[0m");
+        let err = MirrorError::new(&format!(
+            "api call (fetch blob) {}",
+            res.err().unwrap().to_string().to_lowercase()
+        ));
+        return Err(err);
+    }
+    Ok(())
+}
+
 // parse the manifest json for operator indexes only
 pub fn parse_json_manifestlist(data: String) -> Result<ManifestList, Box<dyn std::error::Error>> {
     // Parse the string of data into serde_json::Manifest.
@@ -653,6 +706,7 @@ mod tests {
             blob_sum: String::from("sha256:1234567890"),
             original_ref: Some(url.clone()),
             size: Some(112),
+            number: None,
         };
         let fslayers = vec![fslayer];
         let log = &Logging {
