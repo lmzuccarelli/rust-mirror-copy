@@ -493,7 +493,7 @@ pub async fn get_blob(
     dir: String,
     url: String,
     token: String,
-    _original_ref: String,
+    verify_blob: bool,
     blob_sum: String,
 ) -> Result<(), MirrorError> {
     let client = Client::new();
@@ -512,8 +512,36 @@ pub async fn get_blob(
             let msg = format!("  writing blob {}", blob_digest);
             log.info(&msg);
             let blob_dir = get_blobs_dir(dir.clone(), blob_digest);
-            fs::create_dir_all(blob_dir.clone()).expect("unable to create direcory");
-            fs::write(blob_dir + &blob_digest, body.unwrap()).expect("unable to write blob");
+            let res = fs::create_dir_all(blob_dir.clone());
+            let data = body.unwrap();
+            if verify_blob {
+                let mut hasher = Sha256::new();
+                hasher.update(&data);
+                let result = hasher.finalize();
+                let str_digest = encode(result);
+                if str_digest != blob_digest {
+                    let err = MirrorError::new(&format!(
+                        "blob sum does not match contents {}",
+                        blob_digest
+                    ));
+                    return Err(err);
+                }
+            }
+            if res.is_err() {
+                let err = MirrorError::new(&format!(
+                    "creating blob directory {}",
+                    res.err().unwrap().to_string().to_lowercase()
+                ));
+                return Err(err);
+            }
+            let res_w = fs::write(blob_dir + &blob_digest, data);
+            if res_w.is_err() {
+                let err = MirrorError::new(&format!(
+                    "writing blob data {}",
+                    res_w.err().unwrap().to_string().to_lowercase()
+                ));
+                return Err(err);
+            }
             println!("\x1b[1A \x1b[38C{}", "\x1b[1;92m✓\x1b[0m");
         } else {
             println!("\x1b[1A \x1b[38C{}", "\x1b[1;91m✗\x1b[0m");
