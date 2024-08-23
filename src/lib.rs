@@ -6,6 +6,7 @@ use hex::encode;
 use reqwest::{Client, StatusCode};
 use serde_derive::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use sha256::digest;
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
@@ -501,7 +502,7 @@ pub async fn get_blob(
     let inner_url = format!("{}{}", url.clone(), blob_sum);
     let res = client
         .get(inner_url.clone())
-        .header("Content-Type", "application/octet-stream")
+        //.header("Content-Type", "application/octet-stream")
         .header("Authorization", header_bearer)
         .send()
         .await;
@@ -510,19 +511,25 @@ pub async fn get_blob(
         if body.is_ok() {
             let blob_digest = blob_sum.split(":").nth(1).unwrap();
             let msg = format!("  writing blob {}", blob_digest);
-            log.info(&msg);
-            let blob_dir = get_blobs_dir(dir.clone(), blob_digest);
+            log.ex(&msg);
+            let blob_dir = format!("{}/{}", dir.clone(), &blob_digest[0..2]);
             let res = fs::create_dir_all(blob_dir.clone());
+            if res.is_err() {
+                let err = MirrorError::new(&format!(
+                    "blob dir {} {}",
+                    blob_dir,
+                    res.err().unwrap().to_string().to_lowercase()
+                ));
+                return Err(err);
+            }
             let data = body.unwrap();
             if verify_blob {
-                let mut hasher = Sha256::new();
-                hasher.update(&data);
-                let result = hasher.finalize();
-                let str_digest = encode(result);
-                if str_digest != blob_digest {
+                let hash = digest(data.to_vec());
+                if hash != blob_digest {
                     let err = MirrorError::new(&format!(
-                        "blob sum does not match contents {}",
-                        blob_digest
+                        "blob sum error {} url {}",
+                        blob_digest,
+                        url.clone()
                     ));
                     return Err(err);
                 }
@@ -534,7 +541,8 @@ pub async fn get_blob(
                 ));
                 return Err(err);
             }
-            let res_w = fs::write(blob_dir + &blob_digest, data);
+            let full_dir = format!("{}/{}", blob_dir.clone(), blob_digest);
+            let res_w = fs::write(full_dir.clone(), data);
             if res_w.is_err() {
                 let err = MirrorError::new(&format!(
                     "writing blob data {}",
