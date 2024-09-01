@@ -1,8 +1,8 @@
 use async_trait::async_trait;
-use core::fmt;
 use custom_logger::*;
 use futures::{stream, StreamExt};
 use hex::encode;
+use mirror_error::MirrorError;
 use reqwest::{Client, StatusCode};
 use serde_derive::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -12,8 +12,6 @@ use std::fs;
 use std::path::Path;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
-
-mod error;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct ManifestList {
@@ -91,25 +89,6 @@ pub struct DestinationRegistry {
     pub name: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MirrorError {
-    details: String,
-}
-
-impl MirrorError {
-    pub fn new(msg: &str) -> MirrorError {
-        MirrorError {
-            details: msg.to_string(),
-        }
-    }
-}
-
-impl fmt::Display for MirrorError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", self.details)
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct ImplRegistryInterface {}
 
@@ -120,11 +99,17 @@ pub trait RegistryInterface {
     // rather than just get images (as in push_image)
     // the separation is to allow for more flexibility in just querying (getting)
     // manifests and then based on the response, we can decide to download blobs
-    async fn get_manifest(
+    async fn get_manifest(&self, url: String, token: String) -> Result<String, MirrorError>;
+    // get a single blob
+    async fn get_blob(
         &self,
+        log: &Logging,
+        dir: String,
         url: String,
         token: String,
-    ) -> Result<String, Box<dyn std::error::Error>>;
+        verify_blob: bool,
+        blob_sum: String,
+    ) -> Result<(), MirrorError>;
 
     // used to interact with container registry (retrieve blobs)
     async fn get_blobs(
@@ -150,40 +135,151 @@ pub trait RegistryInterface {
 
 #[async_trait]
 impl RegistryInterface for ImplRegistryInterface {
-    async fn get_manifest(
-        &self,
-        url: String,
-        token: String,
-    ) -> Result<String, Box<dyn std::error::Error>> {
+    async fn get_manifest(&self, url: String, token: String) -> Result<String, MirrorError> {
         let client = Client::new();
         // check without token
         if token.len() == 0 {
-            let body = client
+            let res  = client
                 .get(url)
                 .header("Accept", "application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json")
                 .header("Content-Type", "application/json")
                 .send()
-                .await?
-                .text()
-                .await?;
-
-            return Ok(body);
-        }
-
-        let mut header_bearer: String = "Bearer ".to_owned();
-        header_bearer.push_str(&token);
-        let body = client
+                .await;
+            if res.is_ok() {
+                let body = res.unwrap().text().await;
+                if body.is_ok() {
+                    Ok(body.unwrap())
+                } else {
+                    let err = MirrorError::new(&format!(
+                        "[get_manifest] could not read body contents {}",
+                        body.err().unwrap().to_string().to_lowercase()
+                    ));
+                    Err(err)
+                }
+            } else {
+                let err = MirrorError::new(&format!(
+                    "[get_manifest] could not read body contents {}",
+                    res.err().unwrap().to_string().to_lowercase()
+                ));
+                Err(err)
+            }
+        } else {
+            let mut header_bearer: String = "Bearer ".to_owned();
+            header_bearer.push_str(&token);
+            let res = client
             .get(url)
             .header("Accept", "application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json")
             .header("Content-Type", "application/json")
             .header("Authorization", header_bearer)
             .send()
-            .await?
-            .text()
-            .await?;
+            .await;
 
-        Ok(body)
+            if res.is_ok() {
+                let body = res.unwrap().text().await;
+                if body.is_ok() {
+                    Ok(body.unwrap())
+                } else {
+                    let err = MirrorError::new(&format!(
+                        "[get_manifest] could not read body contents {}",
+                        body.err().unwrap().to_string().to_lowercase()
+                    ));
+                    Err(err)
+                }
+            } else {
+                let err = MirrorError::new(&format!(
+                    "[get_manifest] could not read body contents {}",
+                    res.err().unwrap().to_string().to_lowercase()
+                ));
+                Err(err)
+            }
+        }
     }
+    // get a single blob
+    async fn get_blob(
+        &self,
+        log: &Logging,
+        dir: String,
+        url: String,
+        token: String,
+        verify_blob: bool,
+        blob_sum: String,
+    ) -> Result<(), MirrorError> {
+        let client = Client::new();
+        let header_bearer = format!("Bearer {}", token.clone());
+        let inner_url = format!("{}{}", url.clone(), blob_sum);
+        let res = client
+            .get(inner_url.clone())
+            .header("Authorization", header_bearer)
+            .send()
+            .await;
+        if res.is_ok() {
+            let body = res.unwrap().bytes().await;
+            if body.is_ok() {
+                if !blob_sum.contains("sha256:") {
+                    let err = MirrorError::new("blob sha sum format seems to be incorrect");
+                    return Err(err);
+                }
+                let blob_digest = blob_sum.split(":").nth(1).unwrap();
+                let msg = format!("  writing blob {}", blob_digest);
+                log.ex(&msg);
+                let blob_dir = format!("{}/{}", dir.clone(), &blob_digest[0..2]);
+                let res = fs::create_dir_all(blob_dir.clone());
+                if res.is_err() {
+                    let err = MirrorError::new(&format!(
+                        "blob dir {} {}",
+                        blob_dir,
+                        res.err().unwrap().to_string().to_lowercase()
+                    ));
+                    return Err(err);
+                }
+                let data = body.unwrap();
+                if verify_blob {
+                    let hash = digest(data.to_vec());
+                    if hash != blob_digest {
+                        let err = MirrorError::new(&format!(
+                            "blob sum error {} url {}",
+                            blob_digest,
+                            url.clone()
+                        ));
+                        return Err(err);
+                    }
+                }
+                if res.is_err() {
+                    let err = MirrorError::new(&format!(
+                        "creating blob directory {}",
+                        res.err().unwrap().to_string().to_lowercase()
+                    ));
+                    return Err(err);
+                }
+                let full_dir = format!("{}/{}", blob_dir.clone(), blob_digest);
+                let res_w = fs::write(full_dir.clone(), data);
+                if res_w.is_err() {
+                    let err = MirrorError::new(&format!(
+                        "writing blob data {}",
+                        res_w.err().unwrap().to_string().to_lowercase()
+                    ));
+                    return Err(err);
+                }
+                println!("\x1b[1A \x1b[38C{}", "\x1b[1;92m✓\x1b[0m");
+            } else {
+                println!("\x1b[1A \x1b[38C{}", "\x1b[1;91m✗\x1b[0m");
+                let err = MirrorError::new(&format!(
+                    "reading body contents (fetch blob) {}",
+                    body.err().unwrap().to_string().to_lowercase()
+                ));
+                return Err(err);
+            }
+        } else {
+            println!("\x1b[1A \x1b[38C{}", "\x1b[1;91m✗\x1b[0m");
+            let err = MirrorError::new(&format!(
+                "api call (fetch blob) {}",
+                res.err().unwrap().to_string().to_lowercase()
+            ));
+            return Err(err);
+        }
+        Ok(())
+    }
+
     // get each blob referred to by the vector in parallel
     // set by the PARALLEL_REQUESTS value
     async fn get_blobs(
@@ -278,16 +374,14 @@ impl RegistryInterface for ImplRegistryInterface {
                         }
                         Err(err_resp) => {
                             println!("\x1b[1A \x1b[38C{}", "\x1b[1;91m✗\x1b[0m");
-                            let err = MirrorError::new(&err_resp.to_string());
-                            //return Err(err);
-                            log.error(&format!("downloading blob {:#?}", err.to_string()));
+                            // TODO: consider returning this error
+                            let _err = MirrorError::new(&err_resp.to_string());
                         }
                     },
                     Err(e) => {
                         println!("\x1b[1A \x1b[38C{}", "\x1b[1;91m✗\x1b[0m");
-                        let err = MirrorError::new(&e.to_string());
-                        //return Err(err);
-                        log.error(&format!("downloading blob {:#?}", err.to_string()));
+                        // TODO: consider returning this error
+                        let _err = MirrorError::new(&e.to_string());
                     }
                 }
             }
@@ -489,98 +583,33 @@ pub async fn process_blob(
     Ok(String::from("ok"))
 }
 
-pub async fn get_blob(
-    log: &Logging,
-    dir: String,
-    url: String,
-    token: String,
-    verify_blob: bool,
-    blob_sum: String,
-) -> Result<(), MirrorError> {
-    let client = Client::new();
-    let header_bearer = format!("Bearer {}", token.clone());
-    let inner_url = format!("{}{}", url.clone(), blob_sum);
-    let res = client
-        .get(inner_url.clone())
-        //.header("Content-Type", "application/octet-stream")
-        .header("Authorization", header_bearer)
-        .send()
-        .await;
-    if res.is_ok() {
-        let body = res.unwrap().bytes().await;
-        if body.is_ok() {
-            let blob_digest = blob_sum.split(":").nth(1).unwrap();
-            let msg = format!("  writing blob {}", blob_digest);
-            log.ex(&msg);
-            let blob_dir = format!("{}/{}", dir.clone(), &blob_digest[0..2]);
-            let res = fs::create_dir_all(blob_dir.clone());
-            if res.is_err() {
-                let err = MirrorError::new(&format!(
-                    "blob dir {} {}",
-                    blob_dir,
-                    res.err().unwrap().to_string().to_lowercase()
-                ));
-                return Err(err);
-            }
-            let data = body.unwrap();
-            if verify_blob {
-                let hash = digest(data.to_vec());
-                if hash != blob_digest {
-                    let err = MirrorError::new(&format!(
-                        "blob sum error {} url {}",
-                        blob_digest,
-                        url.clone()
-                    ));
-                    return Err(err);
-                }
-            }
-            if res.is_err() {
-                let err = MirrorError::new(&format!(
-                    "creating blob directory {}",
-                    res.err().unwrap().to_string().to_lowercase()
-                ));
-                return Err(err);
-            }
-            let full_dir = format!("{}/{}", blob_dir.clone(), blob_digest);
-            let res_w = fs::write(full_dir.clone(), data);
-            if res_w.is_err() {
-                let err = MirrorError::new(&format!(
-                    "writing blob data {}",
-                    res_w.err().unwrap().to_string().to_lowercase()
-                ));
-                return Err(err);
-            }
-            println!("\x1b[1A \x1b[38C{}", "\x1b[1;92m✓\x1b[0m");
-        } else {
-            println!("\x1b[1A \x1b[38C{}", "\x1b[1;91m✗\x1b[0m");
-            let err = MirrorError::new(&format!(
-                "reading body contents (fetch blob) {}",
-                body.err().unwrap().to_string().to_lowercase()
-            ));
-            return Err(err);
-        }
-    } else {
-        println!("\x1b[1A \x1b[38C{}", "\x1b[1;91m✗\x1b[0m");
+// parse the manifest json for operator indexes only
+pub fn parse_json_manifestlist(data: String) -> Result<ManifestList, MirrorError> {
+    // Parse the string of data into serde_json::Manifest.
+    let res = serde_json::from_str(&data);
+    if res.is_err() {
         let err = MirrorError::new(&format!(
-            "api call (fetch blob) {}",
+            "[parse_json_manifestlist] {}",
             res.err().unwrap().to_string().to_lowercase()
         ));
         return Err(err);
     }
-    Ok(())
-}
-
-// parse the manifest json for operator indexes only
-pub fn parse_json_manifestlist(data: String) -> Result<ManifestList, Box<dyn std::error::Error>> {
-    // Parse the string of data into serde_json::Manifest.
-    let root: ManifestList = serde_json::from_str(&data)?;
+    let root: ManifestList = res.unwrap();
     Ok(root)
 }
 
 // parse the manifest json for operator indexes only
-pub fn parse_json_manifest_operator(data: String) -> Result<Manifest, Box<dyn std::error::Error>> {
+pub fn parse_json_manifest_operator(data: String) -> Result<Manifest, MirrorError> {
     // Parse the string of data into serde_json::Manifest.
-    let root: Manifest = serde_json::from_str(&data)?;
+    let res = serde_json::from_str(&data);
+    if res.is_err() {
+        let err = MirrorError::new(&format!(
+            "[parse_json_manifest_operator] {}",
+            res.err().unwrap().to_string().to_lowercase()
+        ));
+        return Err(err);
+    }
+    let root: Manifest = res.unwrap();
     Ok(root)
 }
 

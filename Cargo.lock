@@ -695,7 +695,7 @@ dependencies = [
 
 [[package]]
 name = "mirror-copy"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -703,6 +703,7 @@ dependencies = [
  "flate2",
  "futures",
  "hex",
+ "mirror-error",
  "mockito",
  "reqwest",
  "serde",
@@ -716,6 +717,11 @@ dependencies = [
  "tokio-test",
  "urlencoding",
 ]
+
+[[package]]
+name = "mirror-error"
+version = "0.1.0"
+source = "git+https://github.com/lmzuccarelli/rust-mirror-error?branch=main#210a4be2c021077ee2bc502a76f8b3a567f8be77"
 
 [[package]]
 name = "mockito"
