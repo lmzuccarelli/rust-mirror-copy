@@ -1,35 +1,15 @@
 use async_trait::async_trait;
 use custom_logger::*;
-use futures::{stream, StreamExt};
 use hex::encode;
 use mirror_error::MirrorError;
 use reqwest::{Client, StatusCode};
 use serde_derive::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sha256::digest;
-use std::collections::HashSet;
 use std::fs;
-use std::path::Path;
+use std::os::unix::fs::MetadataExt;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct ManifestList {
-    #[serde(rename = "manifests")]
-    pub manifests: Vec<Manifest>,
-
-    #[serde(rename = "mediaType")]
-    pub media_type: String,
-}
-
-#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FsLayer {
-    pub blob_sum: String,
-    pub original_ref: Option<String>,
-    pub size: Option<i64>,
-    pub number: Option<i16>,
-}
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -72,28 +52,11 @@ pub struct ManifestPlatform {
     pub os: String,
 }
 
-// ImageReference
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ImageReference {
-    pub registry: String,
-    pub namespace: String,
-    pub name: String,
-    pub version: String,
-}
-
-// DestinationRegistry
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DestinationRegistry {
-    pub protocol: String,
-    pub registry: String,
-    pub name: String,
-}
-
 #[derive(Debug, Clone)]
-pub struct ImplRegistryInterface {}
+pub struct ImplDownloadImageInterface {}
 
 #[async_trait]
-pub trait RegistryInterface {
+pub trait DownloadImageInterface {
     // used to interact with container registry (manifest calls)
     // this seems strange to expose the get manifest and get blobs
     // rather than just get images (as in push_image)
@@ -110,31 +73,10 @@ pub trait RegistryInterface {
         verify_blob: bool,
         blob_sum: String,
     ) -> Result<(), MirrorError>;
-
-    // used to interact with container registry (retrieve blobs)
-    async fn get_blobs(
-        &self,
-        log: &Logging,
-        dir: String,
-        url: String,
-        token: String,
-        layers: Vec<FsLayer>,
-    ) -> Result<String, MirrorError>;
-
-    // used to interact with container registry (push blobs)
-    async fn push_image(
-        &self,
-        log: &Logging,
-        dir: String,
-        sub_component: String,
-        url: String,
-        token: String,
-        manifest: Manifest,
-    ) -> Result<String, MirrorError>;
 }
 
 #[async_trait]
-impl RegistryInterface for ImplRegistryInterface {
+impl DownloadImageInterface for ImplDownloadImageInterface {
     async fn get_manifest(&self, url: String, token: String) -> Result<String, MirrorError> {
         let client = Client::new();
         // check without token
@@ -279,176 +221,82 @@ impl RegistryInterface for ImplRegistryInterface {
         }
         Ok(())
     }
+}
 
-    // get each blob referred to by the vector in parallel
-    // set by the PARALLEL_REQUESTS value
-    async fn get_blobs(
+#[derive(Debug, Clone)]
+pub struct ImplUploadImageInterface {}
+
+#[async_trait]
+pub trait UploadImageInterface {
+    async fn process_manifests(
         &self,
         log: &Logging,
-        dir: String,
         url: String,
-        token: String,
-        layers: Vec<FsLayer>,
-    ) -> Result<String, MirrorError> {
-        const PARALLEL_REQUESTS: usize = 8;
-        let client = Client::new();
-
-        // remove all duplicates in FsLayer
-        let mut images = Vec::new();
-        let mut seen = HashSet::new();
-        for img in layers.iter() {
-            // truncate sha256:
-            let truncated_image = img.blob_sum.split(":").nth(1).unwrap();
-            let inner_blobs_file = get_blobs_file(dir.clone(), &truncated_image);
-            let mut exists = Path::new(&inner_blobs_file).exists();
-            if exists {
-                let metadata = fs::metadata(&inner_blobs_file).unwrap();
-                if img.size.is_some() {
-                    if metadata.len() != img.size.unwrap() as u64 {
-                        exists = false;
-                    }
-                } else {
-                    exists = false;
-                }
-            }
-
-            // filter out duplicates
-            if !seen.contains(&truncated_image) && !exists {
-                seen.insert(truncated_image);
-                if url == "" {
-                    let img_orig = img.original_ref.clone().unwrap();
-                    let img_ref = get_blobs_url_by_string(img_orig);
-                    let layer = FsLayer {
-                        blob_sum: img.blob_sum.clone(),
-                        original_ref: Some(img_ref),
-                        size: img.size,
-                        number: None,
-                    };
-                    images.push(layer);
-                } else {
-                    let layer = FsLayer {
-                        blob_sum: img.blob_sum.clone(),
-                        original_ref: Some(url.clone()),
-                        size: img.size,
-                        number: None,
-                    };
-                    images.push(layer);
-                }
-            }
-        }
-
-        log.trace(&format!("fslayers vector {:#?}", images));
-        let mut header_bearer: String = "Bearer ".to_owned();
-        header_bearer.push_str(&token);
-
-        if images.len() > 0 {
-            log.info(&format!("downloading {} blobs", images.len()));
-        } else {
-            log.debug("no diff found in blobs cache")
-        }
-
-        let fetches = stream::iter(images.into_iter().map(|blob| {
-            let client = client.clone();
-            let url = blob.original_ref.unwrap().clone();
-            let header_bearer = header_bearer.clone();
-            let wrk_dir = dir.clone();
-
-            async move {
-                match client
-                    .get(url.clone() + &blob.blob_sum)
-                    .header("Authorization", header_bearer)
-                    .send()
-                    .await
-                {
-                    Ok(resp) => match resp.bytes().await {
-                        Ok(bytes) => {
-                            let blob_digest = blob.blob_sum.split(":").nth(1).unwrap();
-                            let msg = format!("  writing blob {}", blob_digest);
-                            log.info(&msg);
-                            let blob_dir = get_blobs_dir(wrk_dir.clone(), blob_digest);
-                            fs::create_dir_all(blob_dir.clone())
-                                .expect("unable to create direcory");
-                            fs::write(blob_dir + &blob_digest, bytes.clone())
-                                .expect("unable to write blob");
-                            println!("\x1b[1A \x1b[38C{}", "\x1b[1;92m✓\x1b[0m");
-                        }
-                        Err(err_resp) => {
-                            println!("\x1b[1A \x1b[38C{}", "\x1b[1;91m✗\x1b[0m");
-                            // TODO: consider returning this error
-                            let _err = MirrorError::new(&err_resp.to_string());
-                        }
-                    },
-                    Err(e) => {
-                        println!("\x1b[1A \x1b[38C{}", "\x1b[1;91m✗\x1b[0m");
-                        // TODO: consider returning this error
-                        let _err = MirrorError::new(&e.to_string());
-                    }
-                }
-            }
-        }))
-        .buffer_unordered(PARALLEL_REQUESTS)
-        .collect::<Vec<()>>();
-        fetches.await;
-        Ok(String::from("ok"))
-    }
-    // push each image (blobs and manifest) referred to by the Manifest
-    async fn push_image(
-        &self,
-        log: &Logging,
-        dir: String,
-        sub_component: String,
-        url: String,
-        token: String,
+        namespace: String,
         manifest: Manifest,
+        tag_digest: String,
+        token: String,
+    ) -> Result<String, MirrorError>;
+
+    async fn check_manifest(
+        &self,
+        log: &Logging,
+        url: String,
+        namespace: String,
+        tag_digest: String,
+        token: String,
+    ) -> Result<String, MirrorError>;
+
+    async fn process_blob(
+        &self,
+        log: &Logging,
+        url: String,
+        namespace: String,
+        dir: String,
+        skip_verify: bool,
+        blob: String,
+        token: String,
+    ) -> Result<String, MirrorError>;
+}
+
+#[async_trait]
+impl UploadImageInterface for ImplUploadImageInterface {
+    async fn process_manifests(
+        &self,
+        _log: &Logging,
+        url: String,
+        namespace: String,
+        manifest: Manifest,
+        tag_digest: String,
+        token: String,
     ) -> Result<String, MirrorError> {
         let client = Client::new();
         let client = client.clone();
-
-        // we iterate through all the layers
-        for blob in manifest.clone().layers.unwrap().iter() {
-            let process_res = process_blob(
-                log,
-                dir.clone(),
-                &blob,
-                url.clone(),
-                sub_component.clone(),
-                token.clone(),
-            )
-            .await?;
-            log.debug(&format!(
-                "processed blob status {:#?} : {:#?}",
-                process_res, blob.digest
-            ));
-        }
-
-        // mirror the config blob
-        let blob = manifest.clone().config.unwrap();
-        let _process_res = process_blob(
-            log,
-            dir.clone(),
-            &blob,
-            url.clone(),
-            sub_component.clone(),
-            token.clone(),
-        )
-        .await?;
+        let mut header_bearer: String = "Bearer ".to_owned();
+        header_bearer.push_str(&token);
 
         // finally push the manifest
         let serialized_manifest = serde_json::to_string(&manifest.clone()).unwrap();
-        log.trace(&format!("manifest json {:#?}", serialized_manifest.clone()));
-        let put_url = get_destination_registry(
+
+        let put_url = format!(
+            "https://{}/v2/{}/manifests/",
             url.clone(),
-            sub_component.clone(),
-            String::from("http_manifest"),
+            namespace.clone(),
         );
 
-        let mut hasher = Sha256::new();
-        hasher.update(serialized_manifest.clone());
-        let hash_bytes = hasher.finalize();
-        let str_digest = encode(hash_bytes);
+        let str_digest: String;
+        if tag_digest == "".to_string() {
+            let mut hasher = Sha256::new();
+            hasher.update(serialized_manifest.clone());
+            let hash_bytes = hasher.finalize();
+            str_digest = encode(hash_bytes);
+        } else {
+            str_digest = tag_digest.replace(":", "-");
+        }
         let res_put = client
-            .put(put_url.clone() + &str_digest.clone()[0..7])
+            .put(put_url.clone() + &str_digest.clone())
             .body(serialized_manifest.clone())
+            .header("Authorization", header_bearer)
             .header(
                 "Content-Type",
                 "application/vnd.docker.distribution.manifest.v2+json",
@@ -458,209 +306,211 @@ impl RegistryInterface for ImplRegistryInterface {
             .await;
 
         let result = res_put.unwrap();
-        log.info(&format!("processed image {}", str_digest));
-        log.debug(&format!(
-            "result for manifest {:#?} {} {}",
-            result.status(),
-            sub_component,
-            put_url.clone() + &str_digest.clone()[0..7]
-        ));
-
         if result.status() != StatusCode::CREATED && result.status() != StatusCode::OK {
             let err = MirrorError::new(&format!(
-                "upload manifest failed with status {:#?}",
-                result.status()
+                "[process_manifests] upload manifest failed with status {} : {}",
+                result.status(),
+                result.text().await.unwrap().to_string()
             ));
             Err(err)
         } else {
             Ok(String::from("ok"))
         }
     }
-}
+    async fn check_manifest(
+        &self,
+        _log: &Logging,
+        url: String,
+        namespace: String,
+        tag_digest: String,
+        token: String,
+    ) -> Result<String, MirrorError> {
+        let client = Client::new();
+        let client = client.clone();
+        let header_bearer = format!("Bearer {}", token);
 
-// Refer to https://distribution.github.io/distribution/spec/api/
-// for the full flow on image (container) push
-// 1. First step is to post a blob
-//    POST /v2/<name>/blobs/uploads/
-//    If the POST request is successful, a 202 Accepted response will be returned
-//    with Location and UUID
-// 2. Check if the blob exists
-//    HEAD /v2/<name>/blobs/<digest>
-//    If the layer with the digest specified in digest is available, a 200 OK response will be received,
-//    with no actual body content (this is according to http specification).
-// 3. If it does not exist do a put
-//    PUT /v2/<name>/blobs/uploads/<uuid>?digest=<digest>
-//    continue for each blob in the specifid container
-// 4. Finally upload the manifest
-//    PUT /v2/<name>/manifests/<reference>
-pub async fn process_blob(
-    log: &Logging,
-    dir: String,
-    blob: &Layer,
-    url: String,
-    sub_component: String,
-    token: String,
-) -> Result<String, MirrorError> {
-    let client = Client::new();
-    let client = client.clone();
-    let mut header_bearer: String = "Bearer ".to_owned();
-    header_bearer.push_str(&token);
+        let head_url = format!(
+            "https://{}/v2/{}/manifests/{}",
+            url.clone(),
+            namespace.clone(),
+            tag_digest,
+        );
 
-    // TODO: add https functionality
-    let post_url = get_destination_registry(
-        url.clone(),
-        sub_component.clone(),
-        String::from("http_blobs_uploads"),
-    );
-
-    let res = client
-        .post(post_url.clone())
-        .header("Accept", "*/*")
-        .send()
-        .await;
-
-    let response = res.unwrap();
-
-    if response.status() != StatusCode::ACCEPTED {
-        let err = MirrorError::new(&format!(
-            "initial post failed with status {:#?}",
-            response.status()
-        ));
-        return Err(err);
-    }
-
-    log.debug(&format!("headers {:#?}", response.headers()));
-    let location = response.headers().get("Location").unwrap();
-    //let _uuid = response.headers().get("docker-upload-uuid").unwrap();
-
-    let head_url = get_destination_registry(
-        url.clone(),
-        sub_component.clone(),
-        String::from("http_blobs_digest"),
-    );
-
-    let digest_no_sha = blob.digest.split(":").nth(1).unwrap().to_string();
-    let path = String::from(dir + "/blobs-store/") + &digest_no_sha[0..2] + &"/" + &digest_no_sha;
-
-    let res_head = client
-        .head(head_url.clone() + &blob.digest)
-        .header("Accept", "*/*")
-        .send()
-        .await;
-
-    let response = res_head.unwrap();
-
-    // if blob is not found we need to upload it
-    if response.status() == StatusCode::NOT_FOUND {
-        let mut file = File::open(path.clone()).await.unwrap();
-        let mut vec = Vec::new();
-        let _buf = file.read_to_end(&mut vec).await.unwrap();
-        let url = location.to_str().unwrap().to_string() + &"&digest=" + &blob.digest;
-        log.info(&format!(
-            "content length  {:#?} {:#?}",
-            vec.clone().len(),
-            &blob.digest
-        ));
-
-        let res_put = client
-            .put(url)
-            .body(vec.clone())
-            .header("Content-Type", "application/octet-stream")
-            .header("Content-Length", vec.len())
+        let res_head = client
+            .head(head_url.clone())
+            .header("Accept", "application/json")
+            .header("Authorization", header_bearer)
             .send()
             .await;
 
-        let res_final = res_put.unwrap();
-
-        log.debug(&format!("result from put blob {:#?}", res_final.status()));
-
-        if res_final.status() > StatusCode::CREATED {
-            let err =
-                MirrorError::new(&format!("put blob failed with code {}", res_final.status()));
-            return Err(err);
+        if res_head.is_ok() {
+            let result = res_head.unwrap();
+            if result.status() != StatusCode::OK {
+                let err = MirrorError::new(&format!(
+                    "upload manifest failed with status {}",
+                    result.status(),
+                ));
+                Err(err)
+            } else {
+                Ok(String::from("ok"))
+            }
+        } else {
+            let err = MirrorError::new(&format!(
+                "[check_manifest] upload manifest failed {}",
+                res_head.err().unwrap().to_string().to_lowercase(),
+            ));
+            Err(err)
         }
     }
-    Ok(String::from("ok"))
+    async fn process_blob(
+        &self,
+        log: &Logging,
+        url: String,
+        namespace: String,
+        dir: String,
+        verify_blobs: bool,
+        blob: String,
+        token: String,
+    ) -> Result<String, MirrorError> {
+        let client = Client::new();
+        let client = client.clone();
+        let mut header_bearer: String = "Bearer ".to_owned();
+        header_bearer.push_str(&token);
+
+        let head_url = format!(
+            "https://{}/v2/{}/blobs/sha256:{}",
+            url.clone(),
+            namespace.clone(),
+            blob.clone()
+        );
+
+        let res_head = client
+            .head(head_url.clone())
+            .header("Authorization", header_bearer.clone())
+            .send()
+            .await;
+
+        if res_head.unwrap().status() == StatusCode::NOT_FOUND {
+            let post_url = format!(
+                "https://{}/v2/{}/blobs/uploads/",
+                url.clone(),
+                namespace.clone(),
+            );
+
+            let res = client
+                .post(post_url.clone())
+                .header("Authorization", header_bearer.clone())
+                .send()
+                .await;
+
+            if res.is_ok() {
+                if res.as_ref().unwrap().status() != StatusCode::ACCEPTED {
+                    let err = MirrorError::new(&format!(
+                        "initial post failed with status {:#?}",
+                        res.unwrap().status()
+                    ));
+                    return Err(err);
+                }
+            } else {
+                let err = MirrorError::new(&format!(
+                    "{}",
+                    res.err().unwrap().to_string().to_lowercase()
+                ));
+                return Err(err);
+            }
+
+            let response = res.unwrap();
+            let location = response.headers().get("Location").unwrap();
+
+            let res_patch = client
+                .patch(location.to_str().unwrap())
+                .header("Authorization", header_bearer.clone())
+                .header("Accept", "application/json")
+                .send()
+                .await;
+
+            let res_response = res_patch.unwrap();
+
+            if res_response.status() == StatusCode::ACCEPTED {
+                let mut file = File::open(dir.clone() + &"/" + &blob).await.unwrap();
+                let mut vec_bytes = Vec::new();
+                let _buf = file.read_to_end(&mut vec_bytes).await.unwrap();
+                if verify_blobs {
+                    let res = verify_file(
+                        log,
+                        dir.clone(),
+                        blob.clone(),
+                        vec_bytes.len() as u64,
+                        vec_bytes.clone(),
+                    )
+                    .await;
+                    if res.is_err() {
+                        let err = MirrorError::new(&format!("{}", res.err().unwrap().to_string(),));
+                        return Err(err);
+                    }
+                }
+                let url = location.to_str().unwrap().to_string() + &"?digest=sha256:" + &blob;
+
+                let res_put = client
+                    .put(url)
+                    .body(vec_bytes.clone())
+                    .header("Authorization", header_bearer.clone())
+                    .header("Content-Type", "application/octet-stream")
+                    .header("Content-Length", vec_bytes.len())
+                    .send()
+                    .await;
+
+                let res_final = res_put.unwrap();
+
+                if res_final.status() > StatusCode::CREATED {
+                    let err = MirrorError::new(&format!(
+                        "[process_blob] put blob failed with code {} : message {:#?}",
+                        res_final.status(),
+                        res_final.text().await.unwrap().to_string()
+                    ));
+                    return Err(err);
+                }
+            }
+        }
+        Ok(String::from("ok"))
+    }
 }
 
-// parse the manifest json for operator indexes only
-pub fn parse_json_manifestlist(data: String) -> Result<ManifestList, MirrorError> {
-    // Parse the string of data into serde_json::Manifest.
-    let res = serde_json::from_str(&data);
-    if res.is_err() {
-        let err = MirrorError::new(&format!(
-            "[parse_json_manifestlist] {}",
-            res.err().unwrap().to_string().to_lowercase()
-        ));
+// verify_file - function to check size and sha256 hash of contents
+async fn verify_file(
+    _log: &Logging,
+    dir: String,
+    blob_sum: String,
+    blob_size: u64,
+    data: Vec<u8>,
+) -> Result<(), MirrorError> {
+    let f = &format!("{}/{}", dir, blob_sum);
+    let res = fs::metadata(&f);
+    if res.is_ok() {
+        if res.unwrap().size() != blob_size {
+            let err = MirrorError::new(&format!(
+                "sha256 file size don't match {}",
+                blob_size.clone()
+            ));
+            return Err(err);
+        }
+        let hash = digest(&data);
+        if hash != blob_sum {
+            let err = MirrorError::new(&format!(
+                "sha256 hash contents don't match {} {}",
+                hash,
+                blob_sum.clone()
+            ));
+            return Err(err);
+        }
+    } else {
+        let err = MirrorError::new(&format!("sha256 hash metadata file {}", f));
         return Err(err);
     }
-    let root: ManifestList = res.unwrap();
-    Ok(root)
+    Ok(())
 }
 
-// parse the manifest json for operator indexes only
-pub fn parse_json_manifest_operator(data: String) -> Result<Manifest, MirrorError> {
-    // Parse the string of data into serde_json::Manifest.
-    let res = serde_json::from_str(&data);
-    if res.is_err() {
-        let err = MirrorError::new(&format!(
-            "[parse_json_manifest_operator] {}",
-            res.err().unwrap().to_string().to_lowercase()
-        ));
-        return Err(err);
-    }
-    let root: Manifest = res.unwrap();
-    Ok(root)
-}
-
-// construct the blobs url
-pub fn get_blobs_url(image_ref: ImageReference) -> String {
-    // return a string in the form of (example below)
-    // "https://registry.redhat.io/v2/redhat/certified-operator-index/blobs/";
-    let mut url = String::from("https://");
-    url.push_str(&image_ref.registry);
-    url.push_str(&"/v2/");
-    url.push_str(&image_ref.namespace);
-    url.push_str("/");
-    url.push_str(&image_ref.name);
-    url.push_str(&"/");
-    url.push_str(&"blobs/");
-    url
-}
-
-// construct the blobs url by string
-pub fn get_blobs_url_by_string(img: String) -> String {
-    let mut parts = img.split("/");
-    let mut url = String::from("https://");
-    url.push_str(&parts.nth(0).unwrap());
-    url.push_str(&"/v2/");
-    url.push_str(&parts.nth(0).unwrap());
-    url.push_str(&"/");
-    let i = parts.nth(0).unwrap();
-    let mut sha = i.split("@");
-    url.push_str(&sha.nth(0).unwrap());
-    url.push_str(&"/blobs/");
-    url
-}
-// construct blobs dir
-pub fn get_blobs_dir(dir: String, name: &str) -> String {
-    // originally working-dir/blobs-store
-    let mut file = dir.clone();
-    file.push_str(&name[..2]);
-    file.push_str(&"/");
-    file
-}
-// construct blobs file
-pub fn get_blobs_file(dir: String, name: &str) -> String {
-    // originally working-dir/blobs-store
-    let mut file = dir.clone();
-    file.push_str("/");
-    file.push_str(&name[..2]);
-    file.push_str(&"/");
-    file.push_str(&name);
-    file
-}
-
+/*
 // get the formatted destination registry (from command line)
 pub fn get_destination_registry(url: String, component: String, mode: String) -> String {
     let mut hld = url.split("docker://");
@@ -721,6 +571,7 @@ pub fn get_destination_registry(url: String, component: String, mode: String) ->
         }
     };
 }
+    */
 
 #[cfg(test)]
 #[allow(unused_must_use)]
@@ -732,6 +583,85 @@ mod tests {
         ($e:expr) => {
             tokio_test::block_on($e)
         };
+    }
+    #[test]
+    fn fs_verify_file_pass() {
+        let log = &Logging {
+            log_level: Level::INFO,
+        };
+
+        macro_rules! aw {
+            ($e:expr) => {
+                tokio_test::block_on($e)
+            };
+        }
+
+        let data = fs::read_to_string(
+            "test-artifacts/c9e9e89d3e43c791365ec19dc5acd1517249a79c09eb482600024cd1c6475abe",
+        )
+        .expect("should read file");
+
+        let res = aw!(verify_file(
+            log,
+            "test-artifacts".to_string(),
+            "c9e9e89d3e43c791365ec19dc5acd1517249a79c09eb482600024cd1c6475abe".to_string(),
+            504,
+            data.into_bytes()
+        ));
+        if res.is_err() {
+            log.error(&format!(
+                "result -> {}",
+                res.as_ref().err().unwrap().to_string().to_lowercase()
+            ));
+        }
+        assert_eq!(res.is_ok(), true);
+    }
+    #[test]
+    fn fs_verify_file_fail() {
+        let log = &Logging {
+            log_level: Level::INFO,
+        };
+
+        macro_rules! aw {
+            ($e:expr) => {
+                tokio_test::block_on($e)
+            };
+        }
+
+        let data = fs::read_to_string(
+            "test-artifacts/c9e9e89d3e43c791365ec19dc5acd1517249a79c09eb482600024cd1c6475abe",
+        )
+        .expect("should read file");
+
+        let res = aw!(verify_file(
+            log,
+            "test-artifacts".to_string(),
+            "c9e9e89d3e43c791365ec19dc5acd1517249a79c09eb482600024cd1c6475abe".to_string(),
+            100,
+            data.clone().into_bytes()
+        ));
+        if res.is_err() {
+            log.error(&format!(
+                "result -> {}",
+                res.as_ref().err().unwrap().to_string().to_lowercase()
+            ));
+        }
+        assert_eq!(res.is_err(), true);
+
+        let res = aw!(verify_file(
+            log,
+            "test-artifacts".to_string(),
+            "sha256:65e311ef7036acc3692d291403656b840fd216d120b3c37af768f91df050257d".to_string(),
+            428,
+            data.clone().into_bytes()
+        ));
+        if res.is_err() {
+            log.error(&format!(
+                "result -> {}",
+                res.as_ref().err().unwrap().to_string().to_lowercase()
+            ));
+        }
+        assert_eq!(res.is_err(), true);
     }
 
     #[test]
@@ -747,13 +677,14 @@ mod tests {
             .with_body("{ \"test\": \"hello-world\" }")
             .create();
 
-        let real = ImplRegistryInterface {};
+        let real = ImplDownloadImageInterface {};
 
         let res = aw!(real.get_manifest(url + "/manifests", String::from("token")));
         assert!(res.is_ok());
         assert_eq!(res.unwrap(), String::from("{ \"test\": \"hello-world\" }"));
     }
 
+    /*
     #[test]
     fn get_blobs_pass() {
         let mut server = mockito::Server::new();
@@ -993,6 +924,7 @@ mod tests {
             String::from("http://127.0.0.1:5000/v2/test/test-component/blobs/uploads/")
         );
     }
+    */
 
     #[test]
     fn err_pass() {
