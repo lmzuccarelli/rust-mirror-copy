@@ -510,69 +510,6 @@ async fn verify_file(
     Ok(())
 }
 
-/*
-// get the formatted destination registry (from command line)
-pub fn get_destination_registry(url: String, component: String, mode: String) -> String {
-    let mut hld = url.split("docker://");
-    let reg_str = hld.nth(1).unwrap();
-    let mut name_str = reg_str.split("/");
-    let mut reg = DestinationRegistry {
-        protocol: String::from("http://"),
-        registry: name_str.nth(0).unwrap().to_string(),
-        name: name_str.nth(0).unwrap().to_string(),
-    };
-
-    match mode.as_str() {
-        "https_blobs_uploads" => {
-            reg.protocol = String::from("https://");
-            return reg.protocol
-                + &reg.registry
-                + &"/v2/"
-                + &reg.name
-                + &"/"
-                + &component
-                + &"/blobs/uploads/";
-        }
-        "http_blobs_uploads" => {
-            return reg.protocol
-                + &reg.registry
-                + &"/v2/"
-                + &reg.name
-                + &"/"
-                + &component
-                + &"/blobs/uploads/"
-        }
-        "http_blobs_digest" => {
-            return reg.protocol
-                + &reg.registry
-                + &"/v2/"
-                + &reg.name
-                + &"/"
-                + &component
-                + &"/blobs/"
-        }
-        "http_manifest" => {
-            return reg.protocol
-                + &reg.registry
-                + &"/v2/"
-                + &reg.name
-                + &"/"
-                + &component
-                + &"/manifests/"
-        }
-        _ => {
-            return reg.protocol
-                + &reg.registry
-                + &"/v2/"
-                + &reg.name
-                + "/"
-                + &component
-                + &"/blobs/uploads/"
-        }
-    };
-}
-    */
-
 #[cfg(test)]
 #[allow(unused_must_use)]
 mod tests {
