@@ -2,6 +2,9 @@ use async_trait::async_trait;
 use custom_logger::*;
 use hex::encode;
 use mirror_error::MirrorError;
+use reqwest::header::{
+    HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, USER_AGENT,
+};
 use reqwest::{Client, StatusCode};
 use serde_derive::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -87,7 +90,7 @@ impl DownloadImageInterface for ImplDownloadImageInterface {
                 .header("Content-Type", "application/json")
                 .send()
                 .await;
-            if res.is_ok() {
+            if res.is_ok() && res.as_ref().unwrap().status() == StatusCode::OK {
                 let body = res.unwrap().text().await;
                 if body.is_ok() {
                     Ok(body.unwrap())
@@ -100,8 +103,8 @@ impl DownloadImageInterface for ImplDownloadImageInterface {
                 }
             } else {
                 let err = MirrorError::new(&format!(
-                    "[get_manifest] could not read body contents {}",
-                    res.err().unwrap().to_string().to_lowercase()
+                    "[get_manifest] {}",
+                    res.as_ref().unwrap().status()
                 ));
                 Err(err)
             }
@@ -116,7 +119,7 @@ impl DownloadImageInterface for ImplDownloadImageInterface {
             .send()
             .await;
 
-            if res.is_ok() {
+            if res.is_ok() && res.as_ref().unwrap().status() == StatusCode::OK {
                 let body = res.unwrap().text().await;
                 if body.is_ok() {
                     Ok(body.unwrap())
@@ -129,8 +132,8 @@ impl DownloadImageInterface for ImplDownloadImageInterface {
                 }
             } else {
                 let err = MirrorError::new(&format!(
-                    "[get_manifest] could not read body contents {}",
-                    res.err().unwrap().to_string().to_lowercase()
+                    "[get_manifest] {}",
+                    res.as_ref().unwrap().status()
                 ));
                 Err(err)
             }
@@ -272,17 +275,30 @@ impl UploadImageInterface for ImplUploadImageInterface {
     ) -> Result<String, MirrorError> {
         let client = Client::new();
         let client = client.clone();
-        let mut header_bearer: String = "Bearer ".to_owned();
-        header_bearer.push_str(&token);
+        let mut header_map: HeaderMap = HeaderMap::new();
 
         // finally push the manifest
         let serialized_manifest = serde_json::to_string(&manifest.clone()).unwrap();
 
-        let put_url = format!(
+        let mut put_url = format!(
             "https://{}/v2/{}/manifests/",
             url.clone(),
             namespace.clone(),
         );
+
+        if token.len() == 0 {
+            put_url = put_url.replace("https", "http");
+        }
+        header_map.insert(USER_AGENT, HeaderValue::from_static("image-mirror"));
+        header_map.insert(
+            AUTHORIZATION,
+            HeaderValue::from_str(&format!("{} {}", "Bearer", token)).unwrap(),
+        );
+        header_map.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/vnd.docker.distribution.manifest.v2+json"),
+        );
+        header_map.insert(CONTENT_LENGTH, HeaderValue::from(serialized_manifest.len()));
 
         let str_digest: String;
         if tag_digest == "".to_string() {
@@ -296,12 +312,7 @@ impl UploadImageInterface for ImplUploadImageInterface {
         let res_put = client
             .put(put_url.clone() + &str_digest.clone())
             .body(serialized_manifest.clone())
-            .header("Authorization", header_bearer)
-            .header(
-                "Content-Type",
-                "application/vnd.docker.distribution.manifest.v2+json",
-            )
-            .header("Content-Length", serialized_manifest.len())
+            .headers(header_map.clone())
             .send()
             .await;
 
@@ -327,19 +338,27 @@ impl UploadImageInterface for ImplUploadImageInterface {
     ) -> Result<String, MirrorError> {
         let client = Client::new();
         let client = client.clone();
-        let header_bearer = format!("Bearer {}", token);
+        let mut header_map: HeaderMap = HeaderMap::new();
 
-        let head_url = format!(
+        let mut head_url = format!(
             "https://{}/v2/{}/manifests/{}",
             url.clone(),
             namespace.clone(),
             tag_digest,
         );
 
+        if token.len() == 0 {
+            head_url = head_url.replace("https", "http");
+        }
+        header_map.insert(USER_AGENT, HeaderValue::from_static("image-mirror"));
+        header_map.insert(
+            AUTHORIZATION,
+            HeaderValue::from_str(&format!("{} {}", "Bearer", token)).unwrap(),
+        );
+
         let res_head = client
             .head(head_url.clone())
-            .header("Accept", "application/json")
-            .header("Authorization", header_bearer)
+            .headers(header_map.clone())
             .send()
             .await;
 
@@ -347,7 +366,7 @@ impl UploadImageInterface for ImplUploadImageInterface {
             let result = res_head.unwrap();
             if result.status() != StatusCode::OK {
                 let err = MirrorError::new(&format!(
-                    "upload manifest failed with status {}",
+                    "[check_manifest] manifest failed with status {}",
                     result.status(),
                 ));
                 Err(err)
@@ -356,7 +375,7 @@ impl UploadImageInterface for ImplUploadImageInterface {
             }
         } else {
             let err = MirrorError::new(&format!(
-                "[check_manifest] upload manifest failed {}",
+                "[check_manifest] manifest failed {}",
                 res_head.err().unwrap().to_string().to_lowercase(),
             ));
             Err(err)
@@ -374,39 +393,48 @@ impl UploadImageInterface for ImplUploadImageInterface {
     ) -> Result<String, MirrorError> {
         let client = Client::new();
         let client = client.clone();
-        let mut header_bearer: String = "Bearer ".to_owned();
-        header_bearer.push_str(&token);
+        let mut header_map: HeaderMap = HeaderMap::new();
 
-        let head_url = format!(
+        let mut head_url = format!(
             "https://{}/v2/{}/blobs/sha256:{}",
             url.clone(),
             namespace.clone(),
             blob.clone()
         );
 
+        let mut post_url = format!(
+            "https://{}/v2/{}/blobs/uploads/",
+            url.clone(),
+            namespace.clone(),
+        );
+
+        if token.len() == 0 {
+            head_url = head_url.replace("https", "http");
+            post_url = post_url.replace("https", "http");
+        }
+        header_map.insert(USER_AGENT, HeaderValue::from_static("image-mirror"));
+        header_map.insert(
+            AUTHORIZATION,
+            HeaderValue::from_str(&format!("{} {}", "Bearer", token)).unwrap(),
+        );
+
         let res_head = client
             .head(head_url.clone())
-            .header("Authorization", header_bearer.clone())
+            .headers(header_map.clone())
             .send()
             .await;
 
         if res_head.unwrap().status() == StatusCode::NOT_FOUND {
-            let post_url = format!(
-                "https://{}/v2/{}/blobs/uploads/",
-                url.clone(),
-                namespace.clone(),
-            );
-
             let res = client
                 .post(post_url.clone())
-                .header("Authorization", header_bearer.clone())
+                .headers(header_map.clone())
                 .send()
                 .await;
 
             if res.is_ok() {
                 if res.as_ref().unwrap().status() != StatusCode::ACCEPTED {
                     let err = MirrorError::new(&format!(
-                        "initial post failed with status {:#?}",
+                        "[process_blob] initial post failed with status {:#?}",
                         res.unwrap().status()
                     ));
                     return Err(err);
@@ -419,19 +447,18 @@ impl UploadImageInterface for ImplUploadImageInterface {
                 return Err(err);
             }
 
-            let response = res.unwrap();
-            let location = response.headers().get("Location").unwrap();
+            let mut response = res.unwrap();
+            let location = response.headers().get("Location").unwrap().clone();
 
             let res_patch = client
                 .patch(location.to_str().unwrap())
-                .header("Authorization", header_bearer.clone())
-                .header("Accept", "application/json")
+                .headers(header_map.clone())
                 .send()
                 .await;
 
-            let res_response = res_patch.unwrap();
+            response = res_patch.unwrap();
 
-            if res_response.status() == StatusCode::ACCEPTED {
+            if response.status() == StatusCode::ACCEPTED {
                 let mut file = File::open(dir.clone() + &"/" + &blob).await.unwrap();
                 let mut vec_bytes = Vec::new();
                 let _buf = file.read_to_end(&mut vec_bytes).await.unwrap();
@@ -445,18 +472,36 @@ impl UploadImageInterface for ImplUploadImageInterface {
                     )
                     .await;
                     if res.is_err() {
-                        let err = MirrorError::new(&format!("{}", res.err().unwrap().to_string(),));
+                        let err = MirrorError::new(&format!(
+                            "[process_blob] {}",
+                            res.err().unwrap().to_string(),
+                        ));
                         return Err(err);
                     }
                 }
-                let url = location.to_str().unwrap().to_string() + &"?digest=sha256:" + &blob;
+                let url: String;
+                if token.len() == 0 {
+                    url = location.to_str().unwrap().to_string() + &"&digest=sha256:" + &blob;
+                } else {
+                    url = location.to_str().unwrap().to_string() + &"?digest=sha256:" + &blob;
+                }
+                if token.len() == 0 {
+                    header_map.insert(
+                        CONTENT_TYPE,
+                        HeaderValue::from_static("application/octet-stream"),
+                    );
+                }
+                header_map.insert(USER_AGENT, HeaderValue::from_static("image-mirror"));
+                header_map.insert(
+                    AUTHORIZATION,
+                    HeaderValue::from_str(&format!("{} {}", "Bearer", token)).unwrap(),
+                );
+                header_map.insert(CONTENT_LENGTH, HeaderValue::from(vec_bytes.len()));
 
                 let res_put = client
                     .put(url)
+                    .headers(header_map.clone())
                     .body(vec_bytes.clone())
-                    .header("Authorization", header_bearer.clone())
-                    .header("Content-Type", "application/octet-stream")
-                    .header("Content-Length", vec_bytes.len())
                     .send()
                     .await;
 
@@ -608,24 +653,50 @@ mod tests {
 
         // Create a mock
         server
-            .mock("GET", "/manifests")
+            .mock("GET", "/v2/manifests")
             .with_status(200)
-            .with_header("content-type", "application/json")
+            .with_header("Content-Type", "application/json")
+            .with_header("Accept", "application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json")
             .with_body("{ \"test\": \"hello-world\" }")
             .create();
 
-        let real = ImplDownloadImageInterface {};
+        let fake = ImplDownloadImageInterface {};
 
-        let res = aw!(real.get_manifest(url + "/manifests", String::from("token")));
+        let res = aw!(fake.get_manifest(url.clone() + "/v2/manifests", String::from("token")));
+        assert!(res.is_ok());
+        assert_eq!(res.unwrap(), String::from("{ \"test\": \"hello-world\" }"));
+
+        let res = aw!(fake.get_manifest(url.clone() + "/v2/manifests", String::from("")));
         assert!(res.is_ok());
         assert_eq!(res.unwrap(), String::from("{ \"test\": \"hello-world\" }"));
     }
+    #[test]
+    fn get_manifest_fail() {
+        let mut server = mockito::Server::new();
+        let url = server.url();
 
-    /*
+        // Create a mock
+        server
+            .mock("GET", "/v2/manifests")
+            .with_status(500)
+            .with_header("Content-Type", "application/json")
+            .with_header("Accept", "application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json")
+            .create();
+
+        let fake = ImplDownloadImageInterface {};
+
+        let res = aw!(fake.get_manifest(url.clone() + "/v2/manifests", String::from("")));
+        assert!(res.is_err());
+    }
+
     #[test]
     fn get_blobs_pass() {
         let mut server = mockito::Server::new();
         let url = server.url();
+
+        let log = &Logging {
+            log_level: Level::TRACE,
+        };
 
         // Create a mock
         server
@@ -635,33 +706,25 @@ mod tests {
             .with_body("{ \"test\": \"hello-world\" }")
             .create();
 
-        let fslayer = FsLayer {
-            blob_sum: String::from("sha256:1234567890"),
-            original_ref: Some(url.clone()),
-            size: Some(112),
-            number: None,
-        };
-        let fslayers = vec![fslayer];
-        let log = &Logging {
-            log_level: Level::INFO,
-        };
-
-        let fake = ImplRegistryInterface {};
+        let fake = ImplDownloadImageInterface {};
 
         // test with url set first
-        aw!(fake.get_blobs(
+        let res = aw!(fake.get_blob(
             log,
             String::from("test-artifacts/test-blobs-store/"),
             url.clone() + "/",
             String::from("token"),
-            fslayers.clone(),
+            false,
+            "sha256:123456789".to_string()
         ));
+        assert!(res.is_ok());
         // check the file contents
-        let s = fs::read_to_string("test-artifacts/test-blobs-store/12/1234567890")
-            .expect("should read file");
-        assert_eq!(s, "{ \"test\": \"hello-world\" }");
-        fs::remove_dir_all("test-artifacts/test-blobs-store").expect("should delete");
+        //let s = fs::read_to_string("test-artifacts/test-blobs-store/12/1234567890")
+        //    .expect("should read file");
+        //assert_eq!(s, "{ \"test\": \"hello-world\" }");
+        //fs::remove_dir_all("test-artifacts/test-blobs-store").expect("should delete");
     }
+    /*
 
     #[test]
     fn push_image_pass() {
