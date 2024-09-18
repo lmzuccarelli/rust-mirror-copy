@@ -480,7 +480,7 @@ impl UploadImageInterface for ImplUploadImageInterface {
                     }
                 }
                 let url: String;
-                if token.len() == 0 {
+                if location.to_str().unwrap().to_string().contains("?") {
                     url = location.to_str().unwrap().to_string() + &"&digest=sha256:" + &blob;
                 } else {
                     url = location.to_str().unwrap().to_string() + &"?digest=sha256:" + &blob;
