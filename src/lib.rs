@@ -9,6 +9,7 @@ use reqwest::{Client, StatusCode};
 use serde_derive::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sha256::digest;
+use std::fmt;
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use tokio::fs::File;
@@ -53,6 +54,25 @@ pub struct ManifestPlatform {
 
     #[serde(rename = "os")]
     pub os: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub enum ManifestType {
+    OciIndex,
+    Oci,
+    V2d2,
+}
+
+// This is really not neccessary but I've left it here
+// for reference
+impl fmt::Display for ManifestType {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            ManifestType::OciIndex => write!(f, "oci-index"),
+            ManifestType::Oci => write!(f, "oci"),
+            ManifestType::V2d2 => write!(f, "dockerv2"),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -241,6 +261,17 @@ pub trait UploadImageInterface {
         token: String,
     ) -> Result<String, MirrorError>;
 
+    async fn process_manifest_string(
+        &self,
+        log: &Logging,
+        url: String,
+        namespace: String,
+        manifest: String,
+        manifest_type: ManifestType,
+        tag_digest: String,
+        token: String,
+    ) -> Result<String, MirrorError>;
+
     async fn check_manifest(
         &self,
         log: &Logging,
@@ -328,6 +359,87 @@ impl UploadImageInterface for ImplUploadImageInterface {
             Ok(String::from("ok"))
         }
     }
+    async fn process_manifest_string(
+        &self,
+        _log: &Logging,
+        url: String,
+        namespace: String,
+        manifest: String,
+        manifest_type: ManifestType,
+        tag_digest: String,
+        token: String,
+    ) -> Result<String, MirrorError> {
+        let client = Client::new();
+        let client = client.clone();
+        let mut header_map: HeaderMap = HeaderMap::new();
+
+        let mut put_url = format!(
+            "https://{}/v2/{}/manifests/",
+            url.clone(),
+            namespace.clone(),
+        );
+
+        if token.len() == 0 {
+            put_url = put_url.replace("https", "http");
+        }
+        header_map.insert(USER_AGENT, HeaderValue::from_static("image-mirror"));
+        header_map.insert(
+            AUTHORIZATION,
+            HeaderValue::from_str(&format!("{} {}", "Bearer", token)).unwrap(),
+        );
+        match manifest_type {
+            ManifestType::OciIndex => {
+                header_map.insert(
+                    CONTENT_TYPE,
+                    HeaderValue::from_static("application/vnd.oci.image.index.v1+json"),
+                );
+            }
+            ManifestType::Oci => {
+                header_map.insert(
+                    CONTENT_TYPE,
+                    HeaderValue::from_static("application/vnd.oci.image.manifest.v1+json"),
+                );
+            }
+            ManifestType::V2d2 => {
+                header_map.insert(
+                    CONTENT_TYPE,
+                    HeaderValue::from_static(
+                        "application/vnd.docker.distribution.manifest.v2+json",
+                    ),
+                );
+            }
+        }
+        header_map.insert(CONTENT_LENGTH, HeaderValue::from(manifest.len()));
+
+        let str_digest: String;
+        if tag_digest == "".to_string() {
+            let mut hasher = Sha256::new();
+            hasher.update(manifest.clone());
+            let hash_bytes = hasher.finalize();
+            str_digest = encode(hash_bytes);
+        } else {
+            str_digest = tag_digest.replace(":", "-");
+        }
+        let res_put = client
+            .put(put_url.clone() + &str_digest.clone())
+            .body(manifest.clone())
+            .headers(header_map.clone())
+            .send()
+            .await;
+
+        let result = res_put.unwrap();
+        if result.status() != StatusCode::CREATED && result.status() != StatusCode::OK {
+            let err = MirrorError::new(&format!(
+                "[process_manifests] upload manifest failed with status {} : {}",
+                result.status(),
+                result.text().await.unwrap().to_string()
+            ));
+            Err(err)
+        } else {
+            Ok(String::from("ok"))
+        }
+    }
+
     async fn check_manifest(
         &self,
         _log: &Logging,
