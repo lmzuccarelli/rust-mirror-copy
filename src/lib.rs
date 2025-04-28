@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use custom_logger::*;
+use custom_logger::info;
 use hex::encode;
 use mirror_error::MirrorError;
 use reqwest::header::{
@@ -89,7 +89,7 @@ pub trait DownloadImageInterface {
     // get a single blob
     async fn get_blob(
         &self,
-        log: &Logging,
+        //log: &Logging,
         dir: String,
         url: String,
         token: String,
@@ -162,7 +162,7 @@ impl DownloadImageInterface for ImplDownloadImageInterface {
     // get a single blob
     async fn get_blob(
         &self,
-        log: &Logging,
+        //log: &Logging,
         dir: String,
         url: String,
         token: String,
@@ -185,8 +185,7 @@ impl DownloadImageInterface for ImplDownloadImageInterface {
                     return Err(err);
                 }
                 let blob_digest = blob_sum.split(":").nth(1).unwrap();
-                let msg = format!("  writing blob {}", blob_digest);
-                log.ex(&msg);
+                info!("\x1b[1;93m*\x1b[0m writing blob {}", blob_digest);
                 let blob_dir = format!("{}/{}", dir.clone(), &blob_digest[0..2]);
                 let res = fs::create_dir_all(blob_dir.clone());
                 if res.is_err() {
@@ -225,9 +224,9 @@ impl DownloadImageInterface for ImplDownloadImageInterface {
                     ));
                     return Err(err);
                 }
-                println!("\x1b[1A \x1b[38C{}", "\x1b[1;92m✓\x1b[0m");
+                println!("\x1b[1A \x1b[35C{}", "\x1b[1;92m✓\x1b[0m");
             } else {
-                println!("\x1b[1A \x1b[38C{}", "\x1b[1;91m✗\x1b[0m");
+                println!("\x1b[1A \x1b[35C{}", "\x1b[1;91m✗\x1b[0m");
                 let err = MirrorError::new(&format!(
                     "reading body contents (fetch blob) {}",
                     body.err().unwrap().to_string().to_lowercase()
@@ -235,7 +234,7 @@ impl DownloadImageInterface for ImplDownloadImageInterface {
                 return Err(err);
             }
         } else {
-            println!("\x1b[1A \x1b[38C{}", "\x1b[1;91m✗\x1b[0m");
+            //println!("\x1b[1A \x1b[38C{}", "\x1b[1;91m✗\x1b[0m");
             let err = MirrorError::new(&format!(
                 "api call (fetch blob) {}",
                 res.err().unwrap().to_string().to_lowercase()
@@ -253,7 +252,7 @@ pub struct ImplUploadImageInterface {}
 pub trait UploadImageInterface {
     async fn process_manifests(
         &self,
-        log: &Logging,
+        //log: &Logging,
         url: String,
         namespace: String,
         manifest: Manifest,
@@ -263,7 +262,7 @@ pub trait UploadImageInterface {
 
     async fn process_manifest_string(
         &self,
-        log: &Logging,
+        //log: &Logging,
         url: String,
         namespace: String,
         manifest: String,
@@ -274,7 +273,7 @@ pub trait UploadImageInterface {
 
     async fn check_manifest(
         &self,
-        log: &Logging,
+        //log: &Logging,
         url: String,
         namespace: String,
         tag_digest: String,
@@ -283,7 +282,7 @@ pub trait UploadImageInterface {
 
     async fn process_blob(
         &self,
-        log: &Logging,
+        //log: &Logging,
         url: String,
         namespace: String,
         dir: String,
@@ -297,7 +296,7 @@ pub trait UploadImageInterface {
 impl UploadImageInterface for ImplUploadImageInterface {
     async fn process_manifests(
         &self,
-        _log: &Logging,
+        //_log: &Logging,
         url: String,
         namespace: String,
         manifest: Manifest,
@@ -361,7 +360,7 @@ impl UploadImageInterface for ImplUploadImageInterface {
     }
     async fn process_manifest_string(
         &self,
-        _log: &Logging,
+        //_log: &Logging,
         url: String,
         namespace: String,
         manifest: String,
@@ -442,7 +441,7 @@ impl UploadImageInterface for ImplUploadImageInterface {
 
     async fn check_manifest(
         &self,
-        _log: &Logging,
+        //_log: &Logging,
         url: String,
         namespace: String,
         tag_digest: String,
@@ -495,7 +494,7 @@ impl UploadImageInterface for ImplUploadImageInterface {
     }
     async fn process_blob(
         &self,
-        log: &Logging,
+        //log: &Logging,
         url: String,
         namespace: String,
         dir: String,
@@ -576,7 +575,7 @@ impl UploadImageInterface for ImplUploadImageInterface {
                 let _buf = file.read_to_end(&mut vec_bytes).await.unwrap();
                 if verify_blobs {
                     let res = verify_file(
-                        log,
+                        //log,
                         dir.clone(),
                         blob.clone(),
                         vec_bytes.len() as u64,
@@ -635,7 +634,7 @@ impl UploadImageInterface for ImplUploadImageInterface {
 
 // verify_file - function to check size and sha256 hash of contents
 async fn verify_file(
-    _log: &Logging,
+    //_log: &Logging,
     dir: String,
     blob_sum: String,
     blob_size: u64,
@@ -672,18 +671,22 @@ async fn verify_file(
 mod tests {
     // this brings everything from parent's scope into this scope
     use super::*;
+    use custom_logger::{error, LevelFilter, Logging};
 
     macro_rules! aw {
         ($e:expr) => {
             tokio_test::block_on($e)
         };
     }
+
+    fn setup() {
+        let log = Logging::new().with_level(LevelFilter::Trace);
+        log.init().expect("should initialize");
+    }
+
     #[test]
     fn fs_verify_file_pass() {
-        let log = &Logging {
-            log_level: Level::INFO,
-        };
-
+        setup();
         macro_rules! aw {
             ($e:expr) => {
                 tokio_test::block_on($e)
@@ -696,26 +699,21 @@ mod tests {
         .expect("should read file");
 
         let res = aw!(verify_file(
-            log,
             "test-artifacts".to_string(),
             "c9e9e89d3e43c791365ec19dc5acd1517249a79c09eb482600024cd1c6475abe".to_string(),
             504,
             data.into_bytes()
         ));
         if res.is_err() {
-            log.error(&format!(
+            error!(
                 "result -> {}",
                 res.as_ref().err().unwrap().to_string().to_lowercase()
-            ));
+            );
         }
         assert_eq!(res.is_ok(), true);
     }
     #[test]
     fn fs_verify_file_fail() {
-        let log = &Logging {
-            log_level: Level::INFO,
-        };
-
         macro_rules! aw {
             ($e:expr) => {
                 tokio_test::block_on($e)
@@ -728,32 +726,30 @@ mod tests {
         .expect("should read file");
 
         let res = aw!(verify_file(
-            log,
             "test-artifacts".to_string(),
             "c9e9e89d3e43c791365ec19dc5acd1517249a79c09eb482600024cd1c6475abe".to_string(),
             100,
             data.clone().into_bytes()
         ));
         if res.is_err() {
-            log.error(&format!(
+            error!(
                 "result -> {}",
                 res.as_ref().err().unwrap().to_string().to_lowercase()
-            ));
+            );
         }
         assert_eq!(res.is_err(), true);
 
         let res = aw!(verify_file(
-            log,
             "test-artifacts".to_string(),
             "sha256:65e311ef7036acc3692d291403656b840fd216d120b3c37af768f91df050257d".to_string(),
             428,
             data.clone().into_bytes()
         ));
         if res.is_err() {
-            log.error(&format!(
+            error!(
                 "result -> {}",
                 res.as_ref().err().unwrap().to_string().to_lowercase()
-            ));
+            );
         }
         assert_eq!(res.is_err(), true);
     }
@@ -806,10 +802,6 @@ mod tests {
         let mut server = mockito::Server::new();
         let url = server.url();
 
-        let log = &Logging {
-            log_level: Level::TRACE,
-        };
-
         // Create a mock
         server
             .mock("GET", "/sha256:1234567890")
@@ -822,7 +814,6 @@ mod tests {
 
         // test with url set first
         let res = aw!(fake.get_blob(
-            log,
             String::from("test-artifacts/test-blobs-store/"),
             url.clone() + "/",
             String::from("token"),
