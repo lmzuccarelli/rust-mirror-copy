@@ -224,9 +224,9 @@ impl DownloadImageInterface for ImplDownloadImageInterface {
                     ));
                     return Err(err);
                 }
-                println!("\x1b[1A \x1b[35C{}", "\x1b[1;92m✓\x1b[0m");
+                println!("\x1b[1A\x1b[36C{}", "\x1b[1;92m✓\x1b[0m");
             } else {
-                println!("\x1b[1A \x1b[35C{}", "\x1b[1;91m✗\x1b[0m");
+                println!("\x1b[1A\x1b[36C{}", "\x1b[1;91m✗\x1b[0m");
                 let err = MirrorError::new(&format!(
                     "reading body contents (fetch blob) {}",
                     body.err().unwrap().to_string().to_lowercase()
@@ -234,7 +234,7 @@ impl DownloadImageInterface for ImplDownloadImageInterface {
                 return Err(err);
             }
         } else {
-            //println!("\x1b[1A \x1b[38C{}", "\x1b[1;91m✗\x1b[0m");
+            println!("\x1b[1A\x1b[36C{}", "\x1b[1;91m✗\x1b[0m");
             let err = MirrorError::new(&format!(
                 "api call (fetch blob) {}",
                 res.err().unwrap().to_string().to_lowercase()
